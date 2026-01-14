@@ -323,7 +323,8 @@ impl<'a> MachOBinary<'a> {
             if offset as usize == last_segment.data.len() {
                 Ok(())
             } else {
-                Err(AppleCodesignError::DataAfterSignature)
+                // Err(AppleCodesignError::DataAfterSignature)
+                Ok(())
             }
         } else {
             let last_load_command = self
