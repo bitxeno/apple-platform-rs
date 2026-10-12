@@ -54,7 +54,21 @@ impl MachOType {
         let magic = goblin::mach::peek(&header, 0)?;
 
         if magic == FAT_MAGIC {
-            Ok(Some(Self::Mach))
+            // FAT Mach-O and Java .class files both start with CAFEBABE.
+            // The next 4 bytes are an architecture count for Mach-O, but
+            // the Java minor/major version for bytecode (typically >= 45).
+            // Reject Java class files before attempting Mach-O parsing.
+            let count = fh.read(&mut header)?;
+            if count < 4 {
+                return Ok(None);
+            }
+
+            let architectures = goblin::mach::peek(&header, 0)?;
+            if (1..0x20).contains(&architectures) {
+                Ok(Some(Self::Mach))
+            } else {
+                Ok(None)
+            }
         } else if let Ok((_, Some(_))) = parse_magic_and_ctx(&header, 0) {
             Ok(Some(Self::MachO))
         } else {
@@ -1102,5 +1116,57 @@ impl SignatureReader {
         }
 
         Ok(entities)
+    }
+}
+
+#[cfg(test)]
+mod macho_detection_tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn detected_as_macho(bytes: &[u8]) -> bool {
+        let mut file = NamedTempFile::new().expect("temporary file");
+        file.write_all(bytes).expect("write fixture");
+        path_is_macho(file.path()).expect("classify fixture")
+    }
+
+    #[test]
+    fn java_class_magic_does_not_mean_fat_macho() {
+        // Java class magic, minor version 0, and versions 45 (Java 1.1),
+        // 61 (Java 17), and 66 (Java 22) all use CAFEBABE.
+        for major in [45u16, 61, 66] {
+            let mut class = vec![0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00];
+            class.extend_from_slice(&major.to_be_bytes());
+            class.extend_from_slice(&[0x00, 0x01]);
+            assert!(!detected_as_macho(&class), "class major version {major}");
+        }
+    }
+
+    #[test]
+    fn fat_macho_with_architecture_count_is_recognized() {
+        for architectures in [1u32, 2, 20, 31] {
+            let mut header = vec![0xca, 0xfe, 0xba, 0xbe];
+            header.extend_from_slice(&architectures.to_be_bytes());
+            assert!(detected_as_macho(&header), "{architectures} architectures");
+        }
+    }
+
+    #[test]
+    fn fat_macho_magic_without_a_valid_architecture_count_is_rejected() {
+        for architectures in [0u32, 32, 61, u32::MAX] {
+            let mut header = vec![0xca, 0xfe, 0xba, 0xbe];
+            header.extend_from_slice(&architectures.to_be_bytes());
+            assert!(!detected_as_macho(&header), "count {architectures}");
+        }
+        assert!(!detected_as_macho(&[0xca, 0xfe, 0xba, 0xbe]));
+        assert!(!detected_as_macho(&[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0]));
+    }
+
+    #[test]
+    fn ordinary_macho_and_non_macho_are_unaffected() {
+        assert!(detected_as_macho(&[0xcf, 0xfa, 0xed, 0xfe]));
+        assert!(!detected_as_macho(&[0x50, 0x4b, 0x03, 0x04]));
+        assert!(!detected_as_macho(&[0x00, 0x00, 0x00, 0x00]));
     }
 }
